@@ -1,9 +1,11 @@
 import 'dart:io';
 import 'dart:math';
+import 'package:path/path.dart' as p;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_camera_view/flutter_camera_view.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:video_player/video_player.dart';
 
 void main() => runApp(MyApp());
@@ -29,15 +31,22 @@ class _MyAppState extends State<MyApp> {
         body: Builder(
           builder: (context) {
             return TextButton(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) {
-                      return CameraViewPage();
-                    },
-                  ),
-                );
+              onPressed: () async {
+                Map<Permission, PermissionStatus> statuses = await [
+                  Permission.camera,
+                  Permission.microphone,
+                  Permission.storage,
+                ].request();
+                if (!statuses.values.contains(PermissionStatus.denied)) {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) {
+                        return CameraViewPage();
+                      },
+                    ),
+                  );
+                }
               },
               child: Center(
                 child: Text('open camera'),
@@ -56,27 +65,48 @@ class CameraViewPage extends StatefulWidget {
 }
 
 class _CameraViewPageState extends State<CameraViewPage> {
-  final controller = AndroidCameraController(onCameraError: (e, st) {});
+  final FlutterCameraController controller = FlutterCameraController(
+    facing: CameraFacing.back,
+    resolutionPreset: ResolutionPreset.QHD,
+    onCameraError: (e, st) {},
+  );
   String? path;
+
+  @override
+  void initState() {
+    super.initState();
+  }
+
+  @override
+  void dispose() {
+    controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.black,
       body: Stack(
         alignment: Alignment.bottomCenter,
         children: <Widget>[
           CameraView(
             controller: controller,
           ),
-          PageView.builder(
-            itemCount: CameraFilter.values.length,
-            itemBuilder: (c, i) {
-              return Container();
-            },
-            scrollDirection: Axis.horizontal,
-            onPageChanged: (index) {
-              var filter = CameraFilter.values[index];
-              controller.setFilters([filter]);
+          ValueListenableBuilder(
+            key: ValueKey(controller.value.state),
+            valueListenable: controller,
+            builder: (context, CameraValue value, child) {
+              if (value.state == CameraState.ready) {
+                return Container();
+              } else if (value.state == CameraState.preparing) {
+                return Container(
+                  color: Colors.black,
+                );
+              }
+              return Container(
+                color: Colors.blue,
+              );
             },
           ),
           Padding(
@@ -92,71 +122,126 @@ class _CameraViewPageState extends State<CameraViewPage> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: <Widget>[
-        if (null != path && !controller.isRecording)
+        if (null != path && !controller.value.isRecordingVideo)
           IconButton(
             icon: Icon(
               Icons.image,
               color: Colors.white,
             ),
             onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) {
-                    return VideoPlayerScreen(
-                      file: File(path!),
-                    );
-                  },
-                ),
-              );
+              if (p.extension(path!) == '.jpg') {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) {
+                      return ImageScreen(
+                        file: File(path!),
+                      );
+                    },
+                  ),
+                );
+              } else {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) {
+                      return VideoPlayerScreen(
+                        file: File(path!),
+                      );
+                    },
+                  ),
+                );
+              }
             },
           ),
-        IconButton(
-          icon: Icon(
-            Icons.switch_camera,
-            color: Colors.white,
+        if (!controller.value.isRecordingVideo)
+          IconButton(
+            icon: Icon(
+              Icons.switch_camera,
+              color: Colors.white,
+            ),
+            onPressed: () async {
+              await controller.toggleFacing();
+              setState(() {});
+            },
           ),
-          onPressed: () {
-            controller.toggleFacing();
-          },
-        ),
+        if (!controller.value.isRecordingVideo)
+          FloatingActionButton(
+            backgroundColor: Colors.green,
+            child: Icon(Icons.camera),
+            onPressed: () async {
+              Directory? directory;
+              if (Platform.isIOS) {
+                directory = await getApplicationDocumentsDirectory();
+              } else {
+                directory = await getExternalStorageDirectory();
+              }
+              path =
+                  '${directory!.path}/imagefile_${Random().nextInt(100000)}.jpg';
+              await controller.takePicture(File(path!), saveToLibrary: true);
+              setState(() {});
+            },
+          ),
         FloatingActionButton(
           backgroundColor: Colors.red,
-          child: Icon(controller.isRecording ? Icons.stop : Icons.videocam),
+          child: Icon(
+              controller.value.isRecordingVideo ? Icons.stop : Icons.videocam),
           onPressed: () async {
-            if (controller.isRecording) {
+            if (controller.value.isRecordingVideo) {
               await controller.stopRecording();
               print('videoRecordingEnd: $path');
             } else {
-              final directory = await getApplicationDocumentsDirectory();
+              Directory? directory;
+              if (Platform.isIOS) {
+                directory = await getApplicationDocumentsDirectory();
+              } else {
+                directory = await getExternalStorageDirectory();
+              }
               path =
-                  '${directory.path}/videofile_${Random().nextInt(100000)}.mp4';
+                  '${directory!.path}/videofile_${Random().nextInt(100000)}.mp4';
               final isRecording = await controller.startRecording(
                 File(path!),
-                snapshot: true,
+                saveToLibrary: true,
               );
               print("startRecordButton: isRecording: $isRecording");
             }
             setState(() {});
           },
         ),
-        IconButton(
-          icon: Icon(
-            controller.flash == CameraFlash.torch
-                ? Icons.flash_off
-                : Icons.flash_on,
-            color: Colors.white,
+        if (!controller.value.isRecordingVideo &&
+            controller.value.facing == CameraFacing.back)
+          IconButton(
+            icon: Icon(
+              controller.value.flash == CameraFlash.off
+                  ? Icons.flash_off
+                  : Icons.flash_on,
+              color: Colors.white,
+            ),
+            onPressed: () async {
+              if (controller.value.flash == CameraFlash.on) {
+                controller.setFlash(CameraFlash.off);
+              } else {
+                controller.setFlash(CameraFlash.off);
+              }
+              setState(() {});
+            },
           ),
-          onPressed: () async {
-            if (controller.flash == CameraFlash.torch) {
-              controller.setFlash(CameraFlash.off);
-            } else {
-              controller.setFlash(CameraFlash.torch);
-            }
-            setState(() {});
-          },
-        ),
       ],
+    );
+  }
+}
+
+class ImageScreen extends StatelessWidget {
+  const ImageScreen({Key? key, this.file}) : super(key: key);
+
+  final File? file;
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.black,
+      child: Center(
+        child: Image.file(file!),
+      ),
     );
   }
 }
@@ -201,15 +286,17 @@ class _VideoPlayerScreenState extends State<VideoPlayerScreen> {
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: () {
-        if (_controller.value.isInitialized) {
-          _controller.setLooping(true);
-          _controller.play();
-        }
+        // if (_controller.value.isInitialized) {
+        //   _controller.setLooping(true);
+        //   _controller.play();
+        // }
       },
       child: FutureBuilder(
         future: _initializeVideoPlayerFuture,
         builder: (context, snapshot) {
           if (snapshot.connectionState == ConnectionState.done) {
+            _controller.setLooping(true);
+            _controller.play();
             // If the VideoPlayerController has finished initialization, use
             // the data it provides to limit the aspect ratio of the VideoPlayer.
             return AspectRatio(

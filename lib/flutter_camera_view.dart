@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 enum CameraFacing {
@@ -12,104 +13,218 @@ enum CameraFacing {
 enum CameraFlash {
   on,
   off,
-  torch,
   auto,
 }
 
-enum CameraFilter {
-  NoFilter,
-  AutoFix,
-  BlackAndWhite,
-  Brightness,
-  Contrast,
-  CrossProcess,
-  Documentary,
-  Duotone,
-  FillLight,
-  Gamma,
-  Grain,
-  GrayScale,
-  Hue,
-  InvertColors,
-  Lomoish,
-  Posterize,
-  Saturation,
-  Sepia,
-  Sharpness,
-  Temperature,
-  Tint,
-  Vignette,
+enum ResolutionPreset {
+  /// 2160p (3840x2160)
+  UHD,
+
+  /// 1080p (1920x1080)
+  FHD,
+
+  /// 720p (1280x720)
+  HD,
+
+  /// 540p (960x540)
+  QHD,
+
+  /// 480p (640x480 on iOS, 720x480 on Android)
+  LOW,
 }
 
-enum VideoQuality {
-  UltraHd,
-  FullHd,
-  Hd,
-  Low,
-  VeryLow,
+extension ExtensionResolutionPreset on ResolutionPreset {
+  String get size {
+    String string;
+    switch (this) {
+      case ResolutionPreset.UHD:
+        string = '2160p';
+        break;
+      case ResolutionPreset.FHD:
+        string = '1080p';
+        break;
+      case ResolutionPreset.HD:
+        string = '720p';
+        break;
+      case ResolutionPreset.QHD:
+        string = '540p';
+        break;
+      case ResolutionPreset.LOW:
+        string = '480p';
+        break;
+      default:
+        string = '1080p';
+    }
+    return string;
+  }
 }
 
-class AndroidCameraController {
-  static const _channelName = 'android_camera_view_channel';
+enum CameraState { preparing, ready, error }
+
+class ThumbnailConfig {
+  final int quality;
+  final File? file;
+  const ThumbnailConfig({this.quality = 100, this.file});
+}
+
+class CameraValue {
+  final bool isTakingPicture;
+  final bool isRecordingVideo;
+  final CameraState state;
+
+  final CameraFacing facing;
+  final CameraFlash flash;
+  final double zoom;
+  final ResolutionPreset resolutionPreset;
+
+  const CameraValue({
+    this.isTakingPicture = false,
+    this.isRecordingVideo = false,
+    this.state = CameraState.preparing,
+    this.facing = CameraFacing.back,
+    this.flash = CameraFlash.off,
+    this.zoom = 0,
+    this.resolutionPreset = ResolutionPreset.FHD,
+  });
+
+  CameraValue copyWith({
+    bool? isTakingPicture,
+    bool? isRecordingVideo,
+    CameraState? state,
+    CameraFacing? facing,
+    CameraFlash? flash,
+    double? zoom,
+    ResolutionPreset? resolutionPreset,
+  }) {
+    return CameraValue(
+      isTakingPicture: isTakingPicture ?? this.isTakingPicture,
+      isRecordingVideo: isRecordingVideo ?? this.isRecordingVideo,
+      state: state ?? this.state,
+      facing: facing ?? this.facing,
+      flash: flash ?? this.flash,
+      zoom: zoom ?? this.zoom,
+      resolutionPreset: resolutionPreset ?? this.resolutionPreset,
+    );
+  }
+
+  String toString() {
+    return '''isTakingPicture = $isTakingPicture, 
+      isRecordingVideo = $isRecordingVideo, 
+      state = $state,
+      facing = $facing,
+      flash = $flash,
+      zoom = $zoom,
+      resolutionPreset = ${resolutionPreset.size}''';
+  }
+}
+
+class FlutterCameraController extends ValueNotifier<CameraValue> {
+  static const _channelName = 'flutter_camera_view_channel';
   final _channel = MethodChannel(_channelName, JSONMethodCodec());
 
   Function(String, String)? onCameraError;
 
-  CameraFacing facing;
-  bool isRecording = false;
-  bool isOpened = false;
-  CameraFlash flash = CameraFlash.off;
-  double zoom = 0;
-
   Completer<bool>? _videoRecordingCompleter;
-  Function? onVideoRecordingEnd;
-  Function? onVideoTaken;
-  Function? onVideoRecordingStart;
 
-  AndroidCameraController({
-    this.facing = CameraFacing.front,
+  FlutterCameraController({
+    CameraFacing facing = CameraFacing.back,
+    ResolutionPreset resolutionPreset = ResolutionPreset.QHD,
     required this.onCameraError,
-  }) {
+  }) : super(CameraValue(facing: facing, resolutionPreset: resolutionPreset)) {
     _channel.setMethodCallHandler(_methodCallHandler);
   }
 
+  Future<T?> _invokeMethod<T>(String method, [dynamic arguments]) {
+    try {
+      return _channel.invokeMethod<T>(method, arguments);
+    } catch (error) {
+      if (value.state == CameraState.preparing) {
+        value = value.copyWith(
+          state: CameraState.error,
+        );
+      }
+      rethrow;
+    }
+  }
+
+  void initialized() {
+    if (value.state != CameraState.ready) {
+      throw CameraException('not_initialized', 'Camera is not initialized');
+    }
+  }
+
+  /// 录制视频
+  /// * [storeThumbnail] 是否保存缩略图
+  /// * [thumbnailFile] 保存缩略图的路径
   Future<bool> startRecording(
     File file, {
-    VideoQuality videoQuality = VideoQuality.FullHd,
-    Duration? maxDuration,
-    bool snapshot = false,
-    int? snapshotMaxWidth,
-    int? snapshotMaxHeight,
+    ThumbnailConfig? thumbnailConfig = const ThumbnailConfig(),
+    bool saveToLibrary = false,
   }) async {
-    var result = await _channel
-        .invokeMethod(snapshot ? 'takeSnapshot' : 'startRecording', {
-      'file': file.path,
-      'videoSize': _getVideoSize(videoQuality),
-      'maxDuration': maxDuration?.inMilliseconds,
-      'maxWidth': snapshotMaxWidth,
-      'maxHeight': snapshotMaxHeight,
-    });
-    if (result == true) {
-      isRecording = true;
+    try {
+      var result = await _invokeMethod('startRecording', {
+        'file': file.path,
+        'saveToLibrary': saveToLibrary,
+        'storeThumbnail': thumbnailConfig != null,
+        'thumbnailPath': thumbnailConfig?.file?.path,
+        'thumbnailQuality': thumbnailConfig?.quality ?? 100,
+      });
+      if (result == true) {
+        value = value.copyWith(
+          isRecordingVideo: true,
+        );
+      }
+      return result;
+    } on PlatformException catch (error, stacktrace) {
+      value = value.copyWith(
+        isRecordingVideo: false,
+      );
+      print(error);
+      print(stacktrace);
     }
-    return result;
+    return Future.value(false);
+  }
+
+  Future<bool> takePicture(
+    File file, {
+    bool saveToLibrary = false,
+  }) async {
+    value = value.copyWith(
+      isTakingPicture: true,
+    );
+    try {
+      var result = await _invokeMethod('takePicture', {
+        'file': file.path,
+        'saveToLibrary': saveToLibrary,
+      });
+      if (result == true) {
+        value = value.copyWith(
+          isTakingPicture: false,
+        );
+      }
+      return result;
+    } on PlatformException catch (error, stacktrace) {
+      value = value.copyWith(
+        isTakingPicture: false,
+      );
+      print(error);
+      print(stacktrace);
+    }
+    return Future.value(false);
   }
 
   Future<bool> stopRecording() async {
-    final result = await _channel.invokeMethod('stopRecording');
-    if (result == true) {
-      isRecording = false;
-    }
-    if (_videoRecordingCompleter == null) {
-      _videoRecordingCompleter = Completer<bool>();
-    }
-    return _videoRecordingCompleter!.future;
-  }
-
-  Future<bool> startPreview() {
     try {
-      final result = _channel.invokeMethod('startPreview');
-      return result as Future<bool>;
+      final result = await _invokeMethod('stopRecording');
+      if (result == true) {
+        value = value.copyWith(
+          isRecordingVideo: true,
+        );
+      }
+      if (_videoRecordingCompleter == null) {
+        _videoRecordingCompleter = Completer<bool>();
+      }
+      return _videoRecordingCompleter!.future;
     } on PlatformException catch (error, stacktrace) {
       print(error);
       print(stacktrace);
@@ -117,10 +232,27 @@ class AndroidCameraController {
     return Future.value(false);
   }
 
-  Future<bool> stopPreview() {
+  Future<bool> startPreview() async {
     try {
-      final result = _channel.invokeMethod('stopPreview');
-      return result as Future<bool>;
+      final bool result = await _invokeMethod('startPreview');
+      value = value.copyWith(
+        state: CameraState.ready,
+      );
+      return Future.value(result);
+    } on PlatformException catch (error, stacktrace) {
+      print(error);
+      print(stacktrace);
+    }
+    return Future.value(false);
+  }
+
+  Future<bool> stopPreview() async {
+    try {
+      final bool result = await _invokeMethod('stopPreview');
+      value = value.copyWith(
+        state: CameraState.preparing,
+      );
+      return Future.value(result);
     } on PlatformException catch (error, stacktrace) {
       print(error);
       print(stacktrace);
@@ -130,11 +262,13 @@ class AndroidCameraController {
 
   Future<bool> setFacing(CameraFacing facing) async {
     try {
-      final result = await _channel.invokeMethod('setFacing', {
+      final result = await _invokeMethod('setFacing', {
         'facing': facing == CameraFacing.back ? 'BACK' : 'FRONT',
       });
       if (result == true) {
-        this.facing = facing;
+        value = value.copyWith(
+          facing: facing,
+        );
       }
       return result;
     } on PlatformException catch (error, stacktrace) {
@@ -148,11 +282,13 @@ class AndroidCameraController {
     try {
       final str = flash.toString();
       final fstr = str.substring(str.indexOf('.') + 1);
-      final result = await _channel.invokeMethod('setFlash', {
+      final result = await _invokeMethod('setFlash', {
         'flash': fstr.toUpperCase(),
       });
       if (result == true) {
-        this.flash = flash;
+        value = value.copyWith(
+          flash: flash,
+        );
       }
       return result;
     } on PlatformException catch (error, stacktrace) {
@@ -162,34 +298,25 @@ class AndroidCameraController {
     return Future.value(false);
   }
 
-  Future setZoom(double zoom) {
+  Future<void> setZoom(double zoom) async {
     try {
-      _channel.invokeMethod("setZoom", {
+      await _invokeMethod("setZoom", {
         'zoom': zoom,
       });
-      this.zoom = zoom;
-    } on PlatformException catch (error, stacktrace) {
-      print(error);
-      print(stacktrace);
-    }
-    return Future.value();
-  }
 
-  Future<void> setFilters(List<CameraFilter> filters) {
-    try {
-      _channel.invokeMethod("setFilters", {
-        'filters': filters.map((f) => _filterToString(f)).toList(),
-      });
+      value = value.copyWith(
+        zoom: zoom,
+      );
     } on PlatformException catch (error, stacktrace) {
       print(error);
       print(stacktrace);
     }
-    return Future.value();
   }
 
   Future<bool> toggleFacing() {
-    var newFacing =
-        CameraFacing.front == facing ? CameraFacing.back : CameraFacing.front;
+    var newFacing = CameraFacing.front == value.facing
+        ? CameraFacing.back
+        : CameraFacing.front;
     return setFacing(newFacing);
   }
 
@@ -205,59 +332,56 @@ class AndroidCameraController {
       if (_videoRecordingCompleter != null) {
         _videoRecordingCompleter!.complete(false);
       }
+
+      if (value.state == CameraState.preparing) {
+        value = value.copyWith(
+          state: CameraState.error,
+        );
+      }
     } else if (call.method == 'onCameraOpened') {
-      isOpened = true;
+      value = value.copyWith(
+        state: CameraState.ready,
+      );
     } else if (call.method == 'onCameraClosed') {
-      isOpened = false;
+      value = value.copyWith(
+        state: CameraState.preparing,
+      );
     } else if (call.method == 'onVideoRecordingStart') {
-      isRecording = true;
-      if (onVideoRecordingStart != null) onVideoRecordingStart!();
+      value = value.copyWith(
+        isRecordingVideo: true,
+      );
     } else if (call.method == 'onVideoRecordingEnd') {
-      isRecording = false;
-      if (onVideoRecordingEnd != null) onVideoRecordingEnd!();
+      value = value.copyWith(
+        isRecordingVideo: false,
+      );
     } else if (call.method == 'onVideoTaken') {
       if (_videoRecordingCompleter != null) {
         _videoRecordingCompleter!.complete(true);
         _videoRecordingCompleter = null;
       }
-      if (onVideoTaken != null) onVideoTaken!();
-      isRecording = false;
+      value = value.copyWith(
+        isRecordingVideo: false,
+      );
     }
     return Future.value();
   }
 
-  _getVideoSize(VideoQuality q) {
-    if (q == VideoQuality.FullHd) {
-      return '1080p';
-    } else if (q == VideoQuality.UltraHd) {
-      return '1260p';
-    } else if (q == VideoQuality.Hd) {
-      return '720p';
-    } else if (q == VideoQuality.Low) {
-      return '480p';
-    }
-    return '1080p';
-  }
-
-  _filterToString(CameraFilter filter) {
-    final strFilter = filter.toString();
-    return strFilter.substring(strFilter.indexOf(".") + 1);
-  }
-
-  Future dispose() async {
-    await _channel.invokeMethod("dispose");
-    return null;
+  @override
+  Future<void> dispose() async {
+    try {
+      _invokeMethod("dispose");
+    } catch (e) {}
+    super.dispose();
   }
 }
 
 class CameraView extends StatefulWidget {
-  final AndroidCameraController controller;
+  final FlutterCameraController controller;
 
   CameraView({
     Key? key,
     required this.controller,
-  })   : assert(Platform.isAndroid, 'This plugin olny supports Androd.'),
-        super(key: key);
+  }) : super(key: key);
 
   @override
   _CameraViewState createState() => _CameraViewState();
@@ -271,13 +395,36 @@ class _CameraViewState extends State<CameraView> {
 
   @override
   Widget build(BuildContext context) {
-    return AndroidView(
-      viewType: 'android_camera_view',
-      creationParamsCodec: JSONMessageCodec(),
-      creationParams: {
-        'facing':
-            widget.controller.facing == CameraFacing.back ? 'BACK' : 'FRONT',
-      },
-    );
+    if (defaultTargetPlatform == TargetPlatform.iOS) {
+      return UiKitView(
+        viewType: 'flutter_camera_view',
+        creationParamsCodec: JSONMessageCodec(),
+        creationParams: {
+          'facing': widget.controller.value.facing == CameraFacing.back
+              ? 'BACK'
+              : 'FRONT',
+          'resolutionPreset': widget.controller.value.resolutionPreset.size,
+        },
+      );
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      return AndroidView(
+        viewType: 'flutter_camera_view',
+        creationParamsCodec: JSONMessageCodec(),
+        creationParams: {
+          'facing': widget.controller.value.facing == CameraFacing.back
+              ? 'BACK'
+              : 'FRONT',
+          'resolutionPreset': widget.controller.value.resolutionPreset.size,
+        },
+      );
+    }
+
+    throw UnsupportedError('Unsupported platform view.');
   }
+}
+
+class CameraException implements Exception {
+  final String? message;
+  final String? title;
+  const CameraException([this.title, this.message]);
 }
