@@ -31,22 +31,20 @@ import java.io.OutputStream
 import kotlin.concurrent.thread
 
 class AndroidCameraView
-internal constructor(private val registrar: Registrar, creationParams: Any) : PlatformView, MethodCallHandler, CameraListener() {
+internal constructor(context: Context, methodChannel: MethodChannel, creationParams: Any) : PlatformView, MethodCallHandler, CameraListener() {
     private var cameraView: CameraView
     private var channel: MethodChannel
     private var file: File? = null
     private var storeThumbnail: Boolean = true
-    private var context: Context
+    private var context: Context = context
     private var thumbnailPath: String? = null
     private var thumbnailQuality: Int = 100
     private var mediaMetadataRetriever: MediaMetadataRetriever? = null
     private var saveToLibrary: Boolean = false
 
     init {
-        Log.i("AndroidCameraView", "init!")
-        context = registrar.context()
-        cameraView = initView(registrar, creationParams as JSONObject)
-        channel = MethodChannel(registrar.messenger(), "flutter_camera_view_channel", JSONMethodCodec.INSTANCE)
+        cameraView = initView(context, creationParams as JSONObject)
+        channel = methodChannel
         channel.setMethodCallHandler(this)
     }
 
@@ -65,9 +63,9 @@ internal constructor(private val registrar: Registrar, creationParams: Any) : Pl
     }
 
     @SuppressLint("DefaultLocale")
-    private fun initView(registrar: Registrar, options: JSONObject): CameraView {
+    private fun initView(context: Context,options: JSONObject): CameraView {
         Log.i("AndroidCameraView", "initView: $options")
-        val cameraView = CameraView(registrar.context())
+        val cameraView = CameraView(context)
         cameraView.facing = Facing.valueOf(options.optString("facing", "FRONT").toUpperCase())
         cameraView.mode = Mode.PICTURE
         cameraView.engine = Engine.CAMERA2

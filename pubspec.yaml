@@ -1,6 +1,6 @@
 name: flutter_camera_view
 description: The Flutter camera plugin for Android and iOS allowing to the device cameras.
-version: 0.0.1
+version: 0.0.2
 homepage: https://github.com/lucky1213/flutter_camera_view
 
 environment:
